@@ -51,6 +51,11 @@ static CustomScanMethods RouterCustomScanMethods = {
 	RouterCreateScan
 };
 
+static CustomScanMethods CoordinatorInsertSelectCustomScanMethods = {
+	"Citus INSERT ... SELECT via coordinator",
+	CoordinatorInsertSelectCreateScan
+};
+
 static CustomScanMethods DelayedErrorCustomScanMethods = {
 	"Citus Delayed Error",
 	DelayedErrorCreateScan
@@ -277,6 +282,14 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 		{
 			distributedPlan = CreateDistributedInsertSelectPlan(originalQuery,
 																plannerRestrictionContext);
+
+			if (distributedPlan->planningError != NULL)
+			{
+				RaiseDeferredError(distributedPlan->planningError, DEBUG1);
+
+				/* if INSERT..SELECT cannot be distributed, pull to coordinator */
+				distributedPlan = CreateCoordinatorInsertSelectPlan(originalQuery);
+			}
 		}
 		else
 		{
@@ -499,6 +512,12 @@ FinalizePlan(PlannedStmt *localPlan, MultiPlan *multiPlan)
 		case MULTI_EXECUTOR_ROUTER:
 		{
 			customScan->methods = &RouterCustomScanMethods;
+			break;
+		}
+
+		case MULTI_EXECUTOR_COORDINATOR_INSERT_SELECT:
+		{
+			customScan->methods = &CoordinatorInsertSelectCustomScanMethods;
 			break;
 		}
 
