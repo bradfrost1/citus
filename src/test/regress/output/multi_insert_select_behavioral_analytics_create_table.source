@@ -62,190 +62,132 @@ CREATE INDEX is_index3 ON users_table(value_1);
 CREATE INDEX is_index4 ON events_table(event_type);
 CREATE INDEX is_index5 ON users_table(value_2);
 CREATE INDEX is_index6 ON events_table(value_2);
+-- create a helper function to create types/functions on each node
+CREATE FUNCTION run_command_on_master_and_workers(p_sql text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+     EXECUTE p_sql;
+     PERFORM run_command_on_workers(p_sql);
+END;$$;
 -- Create composite type to use in subquery pushdown
-CREATE TYPE user_composite_type AS
-(
-	tenant_id BIGINT,
-	user_id BIGINT
-);
--- do it on the workers as well
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE TYPE user_composite_type AS
 	(
 		tenant_id BIGINT,
 		user_id BIGINT
 	);
-');
-      run_command_on_workers       
+$f$);
+ run_command_on_master_and_workers 
 -----------------------------------
- (localhost,57637,t,"CREATE TYPE")
- (localhost,57638,t,"CREATE TYPE")
-(2 rows)
+ 
+(1 row)
 
-CREATE FUNCTION cmp_user_composite_type_function(user_composite_type, user_composite_type) RETURNS int
-LANGUAGE 'internal'
-AS 'btrecordcmp'
-IMMUTABLE
-RETURNS NULL ON NULL INPUT;
--- do it on the workers as well
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE FUNCTION cmp_user_composite_type_function(user_composite_type, user_composite_type) RETURNS int
-	LANGUAGE ''internal''
-	AS ''btrecordcmp''
+	LANGUAGE 'internal'
+	AS 'btrecordcmp'
 	IMMUTABLE
 	RETURNS NULL ON NULL INPUT;
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE FUNCTION")
- (localhost,57638,t,"CREATE FUNCTION")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE FUNCTION gt_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-LANGUAGE 'internal'
-AS 'record_gt'
-IMMUTABLE
-RETURNS NULL ON NULL INPUT;
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE FUNCTION gt_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-	LANGUAGE ''internal''
-	AS ''record_gt''
+	LANGUAGE 'internal'
+	AS 'record_gt'
 	IMMUTABLE
 	RETURNS NULL ON NULL INPUT;
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE FUNCTION")
- (localhost,57638,t,"CREATE FUNCTION")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE FUNCTION ge_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-LANGUAGE 'internal'
-AS 'record_ge'
-IMMUTABLE
-RETURNS NULL ON NULL INPUT;
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE FUNCTION ge_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-	LANGUAGE ''internal''
-	AS ''record_ge''
+	LANGUAGE 'internal'
+	AS 'record_ge'
 	IMMUTABLE
 	RETURNS NULL ON NULL INPUT;
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE FUNCTION")
- (localhost,57638,t,"CREATE FUNCTION")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE FUNCTION equal_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-LANGUAGE 'internal'
-AS 'record_eq'
-IMMUTABLE;
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE FUNCTION equal_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-	LANGUAGE ''internal''
-	AS ''record_eq''
+	LANGUAGE 'internal'
+	AS 'record_eq'
 	IMMUTABLE;
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE FUNCTION")
- (localhost,57638,t,"CREATE FUNCTION")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE FUNCTION lt_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-LANGUAGE 'internal'
-AS 'record_lt'
-IMMUTABLE
-RETURNS NULL ON NULL INPUT;
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE FUNCTION lt_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-	LANGUAGE ''internal''
-	AS ''record_lt''
+	LANGUAGE 'internal'
+	AS 'record_lt'
 	IMMUTABLE
 	RETURNS NULL ON NULL INPUT;
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE FUNCTION")
- (localhost,57638,t,"CREATE FUNCTION")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE FUNCTION le_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-LANGUAGE 'internal'
-AS 'record_lt'
-IMMUTABLE
-RETURNS NULL ON NULL INPUT;
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE FUNCTION le_user_composite_type_function(user_composite_type, user_composite_type) RETURNS boolean
-	LANGUAGE ''internal''
-	AS ''record_lt''
+	LANGUAGE 'internal'
+	AS 'record_lt'
 	IMMUTABLE
 	RETURNS NULL ON NULL INPUT;
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE FUNCTION")
- (localhost,57638,t,"CREATE FUNCTION")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE OPERATOR > (
-    LEFTARG = user_composite_type,
-    RIGHTARG = user_composite_type,
-    PROCEDURE = gt_user_composite_type_function
-);
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE OPERATOR > (
 	    LEFTARG = user_composite_type,
 	    RIGHTARG = user_composite_type,
 	    PROCEDURE = gt_user_composite_type_function
 	);
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE OPERATOR")
- (localhost,57638,t,"CREATE OPERATOR")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE OPERATOR >= (
-    LEFTARG = user_composite_type,
-    RIGHTARG = user_composite_type,
-    PROCEDURE = ge_user_composite_type_function
-);
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE OPERATOR >= (
 	    LEFTARG = user_composite_type,
 	    RIGHTARG = user_composite_type,
 	    PROCEDURE = ge_user_composite_type_function
 	);
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE OPERATOR")
- (localhost,57638,t,"CREATE OPERATOR")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
 -- ... use that function to create a custom equality operator...
-CREATE OPERATOR = (
-    LEFTARG = user_composite_type,
-    RIGHTARG = user_composite_type,
-    PROCEDURE = equal_user_composite_type_function,
-	commutator = =, 
-	RESTRICT = eqsel, 
-	JOIN = eqjoinsel, 
-	merges, 
-	hashes
-);
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	-- ... use that function to create a custom equality operator...
 	CREATE OPERATOR = (
@@ -258,99 +200,67 @@ SELECT run_command_on_workers('
 		merges, 
 		hashes
 	);
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE OPERATOR")
- (localhost,57638,t,"CREATE OPERATOR")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE OPERATOR <= (
-    LEFTARG = user_composite_type,
-    RIGHTARG = user_composite_type,
-    PROCEDURE = le_user_composite_type_function
-);
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE OPERATOR <= (
 	    LEFTARG = user_composite_type,
 	    RIGHTARG = user_composite_type,
 	    PROCEDURE = le_user_composite_type_function
 	);
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE OPERATOR")
- (localhost,57638,t,"CREATE OPERATOR")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE OPERATOR < (
-    LEFTARG = user_composite_type,
-    RIGHTARG = user_composite_type,
-    PROCEDURE = lt_user_composite_type_function
-);
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
 	CREATE OPERATOR < (
 	    LEFTARG = user_composite_type,
 	    RIGHTARG = user_composite_type,
 	    PROCEDURE = lt_user_composite_type_function
 	);
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE OPERATOR")
- (localhost,57638,t,"CREATE OPERATOR")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE OPERATOR FAMILY cats_2_op_fam USING hash;
-SELECT run_command_on_workers('
+-- ... and create a custom operator family for hash indexes...
+SELECT run_command_on_master_and_workers($f$
 
-	-- ... and create a custom operator family for hash indexes...
 	CREATE OPERATOR FAMILY cats_2_op_fam USING hash;
-');
-            run_command_on_workers            
-----------------------------------------------
- (localhost,57637,t,"CREATE OPERATOR FAMILY")
- (localhost,57638,t,"CREATE OPERATOR FAMILY")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
 -- ... create a test HASH function. Though it is a poor hash function,
 -- it is acceptable for our tests
-CREATE FUNCTION test_composite_type_hash(user_composite_type) RETURNS int
-AS 'SELECT hashtext( ($1.tenant_id + $1.tenant_id)::text);'     
-LANGUAGE SQL
-IMMUTABLE
-RETURNS NULL ON NULL INPUT;
-SELECT run_command_on_workers('
-	-- ... create a test HASH function. Though it is a poor hash function,
-	-- it is acceptable for our tests
+SELECT run_command_on_master_and_workers($f$
+
 	CREATE FUNCTION test_composite_type_hash(user_composite_type) RETURNS int
-	AS ''SELECT hashtext( ($1.tenant_id + $1.tenant_id)::text);''      
+	AS 'SELECT hashtext( ($1.tenant_id + $1.tenant_id)::text);'
 	LANGUAGE SQL
 	IMMUTABLE
 	RETURNS NULL ON NULL INPUT;
-');
-        run_command_on_workers         
----------------------------------------
- (localhost,57637,t,"CREATE FUNCTION")
- (localhost,57638,t,"CREATE FUNCTION")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
 -- We need to define two different operator classes for the composite types
 -- One uses BTREE the other uses HASH
-CREATE OPERATOR CLASS cats_2_op_fam_clas3
-DEFAULT FOR TYPE user_composite_type USING BTREE AS
-OPERATOR 1 <=  (user_composite_type, user_composite_type),
-OPERATOR 2 <  (user_composite_type, user_composite_type),
-OPERATOR 3 = (user_composite_type, user_composite_type),
-OPERATOR 4 >= (user_composite_type, user_composite_type),
-OPERATOR 5 > (user_composite_type, user_composite_type),
-FUNCTION 1 cmp_user_composite_type_function(user_composite_type, user_composite_type);
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 
-	-- We need to define two different operator classes for the composite types
-	-- One uses BTREE the other uses HASH
 	CREATE OPERATOR CLASS cats_2_op_fam_clas3
 	DEFAULT FOR TYPE user_composite_type USING BTREE AS
 	OPERATOR 1 <=  (user_composite_type, user_composite_type),
@@ -360,29 +270,23 @@ SELECT run_command_on_workers('
 	OPERATOR 5 > (user_composite_type, user_composite_type),
 	
 	FUNCTION 1 cmp_user_composite_type_function(user_composite_type, user_composite_type);
-');
-           run_command_on_workers            
----------------------------------------------
- (localhost,57637,t,"CREATE OPERATOR CLASS")
- (localhost,57638,t,"CREATE OPERATOR CLASS")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
-CREATE OPERATOR CLASS cats_2_op_fam_class
-DEFAULT FOR TYPE user_composite_type USING HASH AS
-OPERATOR 1 = (user_composite_type, user_composite_type),
-FUNCTION 1 test_composite_type_hash(user_composite_type);
-SELECT run_command_on_workers('
+SELECT run_command_on_master_and_workers($f$
 	
 	CREATE OPERATOR CLASS cats_2_op_fam_class
 	DEFAULT FOR TYPE user_composite_type USING HASH AS
 	OPERATOR 1 = (user_composite_type, user_composite_type),
 	FUNCTION 1 test_composite_type_hash(user_composite_type);
-');
-           run_command_on_workers            
----------------------------------------------
- (localhost,57637,t,"CREATE OPERATOR CLASS")
- (localhost,57638,t,"CREATE OPERATOR CLASS")
-(2 rows)
+$f$);
+ run_command_on_master_and_workers 
+-----------------------------------
+ 
+(1 row)
 
 CREATE TABLE events (
 	composite_id user_composite_type,
@@ -524,3 +428,4 @@ SET citus.shard_max_size TO "1MB";
 \copy lineitem_subquery FROM '@abs_srcdir@/data/lineitem.2.data' with delimiter '|'
 \copy orders_subquery FROM '@abs_srcdir@/data/orders.1.data' with delimiter '|'
 \copy orders_subquery FROM '@abs_srcdir@/data/orders.2.data' with delimiter '|'
+DROP FUNCTION run_command_on_master_and_workers(p_sql text);
