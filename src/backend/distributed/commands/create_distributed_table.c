@@ -31,6 +31,7 @@
 #include "commands/defrem.h"
 #include "commands/extension.h"
 #include "commands/trigger.h"
+#include "distributed/citus_locals.h"
 #include "distributed/colocation_utils.h"
 #include "distributed/distribution_column.h"
 #include "distributed/master_metadata_utility.h"
@@ -77,13 +78,13 @@ static void ConvertToDistributedTable(Oid relationId, char *distributionColumnNa
 static char LookupDistributionMethod(Oid distributionMethodOid);
 static Oid SupportFunctionForColumn(Var *partitionColumn, Oid accessMethodId,
 									int16 supportFunctionNumber);
-static bool LocalTableEmpty(Oid tableId);
 static void CreateHashDistributedTable(Oid relationId, char *distributionColumnName,
 									   char *colocateWithTableName,
 									   int shardCount, int replicationFactor);
 static Oid ColumnType(Oid relationId, char *columnName);
 static void CopyLocalDataIntoShards(Oid relationId);
 static List * TupleDescColumnNameList(TupleDesc tupleDescriptor);
+static void EnsureSchemaExistsOnAllNodes(Oid relationId);
 
 /* exports for SQL callable functions */
 PG_FUNCTION_INFO_V1(master_create_distributed_table);
@@ -239,7 +240,9 @@ CreateReferenceTable(Oid relationId)
 	int replicationFactor = 0;
 	char *distributionColumnName = NULL;
 	bool requireEmpty = true;
+	bool emptyTable = true;
 	char relationKind = 0;
+	Relation relation = NULL;
 
 	EnsureCoordinator();
 	CheckCitusVersion(ERROR);
@@ -266,13 +269,27 @@ CreateReferenceTable(Oid relationId)
 
 	colocationId = CreateReferenceTableColocationId();
 
+	relation = relation_open(relationId, AccessShareLock);
+
+	/* check that the relation is not distributed */
+	if (IsDistributedTable(relationId))
+	{
+		char *relationName = RelationGetRelationName(relation);
+
+		ereport(ERROR, (errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						errmsg("table \"%s\" is already distributed",
+							   relationName)));
+	}
+
+	emptyTable = LocalTableEmpty(relationId);
+
 	/* first, convert the relation into distributed relation */
 	ConvertToDistributedTable(relationId, distributionColumnName,
 							  DISTRIBUTE_BY_NONE, REPLICATION_MODEL_2PC, colocationId,
 							  requireEmpty);
 
 	/* now, create the single shard replicated to all nodes */
-	CreateReferenceTableShard(relationId);
+	CreateReferenceTableShard(relationId, emptyTable);
 
 	CreateTableMetadataOnWorkers(relationId);
 
@@ -281,6 +298,8 @@ CreateReferenceTable(Oid relationId)
 	{
 		CopyLocalDataIntoShards(relationId);
 	}
+
+	relation_close(relation, NoLock);
 }
 
 
@@ -293,8 +312,7 @@ CreateReferenceTable(Oid relationId)
  * XXX: We should perform more checks here to see if this table is fit for
  * partitioning. At a minimum, we should validate the following: (i) this node
  * runs as the master node, (ii) table does not make use of the inheritance
- * mechanism, (iii) table does not own columns that are sequences, and (iv)
- * table does not have collated columns.
+ * mechanism and (iii) table does not have collated columns.
  */
 static void
 ConvertToDistributedTable(Oid relationId, char *distributionColumnName,
@@ -502,62 +520,6 @@ SupportFunctionForColumn(Var *partitionColumn, Oid accessMethodId,
 
 
 /*
- * LocalTableEmpty function checks whether given local table contains any row and
- * returns false if there is any data. This function is only for local tables and
- * should not be called for distributed tables.
- */
-static bool
-LocalTableEmpty(Oid tableId)
-{
-	Oid schemaId = get_rel_namespace(tableId);
-	char *schemaName = get_namespace_name(schemaId);
-	char *tableName = get_rel_name(tableId);
-	char *tableQualifiedName = quote_qualified_identifier(schemaName, tableName);
-
-	int spiConnectionResult = 0;
-	int spiQueryResult = 0;
-	StringInfo selectExistQueryString = makeStringInfo();
-
-	HeapTuple tuple = NULL;
-	Datum hasDataDatum = 0;
-	bool localTableEmpty = false;
-	bool columnNull = false;
-	bool readOnly = true;
-
-	int rowId = 0;
-	int attributeId = 1;
-
-	AssertArg(!IsDistributedTable(tableId));
-
-	spiConnectionResult = SPI_connect();
-	if (spiConnectionResult != SPI_OK_CONNECT)
-	{
-		ereport(ERROR, (errmsg("could not connect to SPI manager")));
-	}
-
-	appendStringInfo(selectExistQueryString, SELECT_EXIST_QUERY, tableQualifiedName);
-
-	spiQueryResult = SPI_execute(selectExistQueryString->data, readOnly, 0);
-	if (spiQueryResult != SPI_OK_SELECT)
-	{
-		ereport(ERROR, (errmsg("execution was not successful \"%s\"",
-							   selectExistQueryString->data)));
-	}
-
-	/* we expect that SELECT EXISTS query will return single value in a single row */
-	Assert(SPI_processed == 1);
-
-	tuple = SPI_tuptable->vals[rowId];
-	hasDataDatum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, attributeId, &columnNull);
-	localTableEmpty = !DatumGetBool(hasDataDatum);
-
-	SPI_finish();
-
-	return localTableEmpty;
-}
-
-
-/*
  * CreateTruncateTrigger creates a truncate trigger on table identified by relationId
  * and assigns citus_truncate_trigger() as handler.
  */
@@ -601,9 +563,10 @@ CreateHashDistributedTable(Oid relationId, char *distributionColumnName,
 	Oid sourceRelationId = InvalidOid;
 	Oid distributionColumnType = InvalidOid;
 	bool requireEmpty = true;
+	bool emptyTable = true;
 	char relationKind = 0;
 
-	/* get an access lock on the relation to prevent DROP TABLE and ALTER TABLE */
+	/* get an access lock on the relation to prevent any other backend to add tuple */
 	distributedRelation = relation_open(relationId, AccessShareLock);
 
 	/*
@@ -651,9 +614,29 @@ CreateHashDistributedTable(Oid relationId, char *distributionColumnName,
 		requireEmpty = false;
 	}
 
+	/* check that the relation is not distributed */
+	if (IsDistributedTable(relationId))
+	{
+		char *relationName = RelationGetRelationName(distributedRelation);
+
+		ereport(ERROR, (errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						errmsg("table \"%s\" is already distributed",
+							   relationName)));
+	}
+
+	emptyTable = LocalTableEmpty(relationId);
+
 	/* create distributed table metadata */
 	ConvertToDistributedTable(relationId, distributionColumnName, DISTRIBUTE_BY_HASH,
 							  ReplicationModel, colocationId, requireEmpty);
+
+	/*
+	 * Ensure both schema and sequence tables exist on each worker mode. We can not
+	 * implement these functions transactionally, since seperate transactions don't
+	 * knot whether other transactions already created these sequences(or schemas)
+	 * or not.
+	 */
+	EnsureSchemaExistsOnAllNodes(relationId);
 
 	/* create shards */
 	if (sourceRelationId != InvalidOid)
@@ -662,12 +645,12 @@ CreateHashDistributedTable(Oid relationId, char *distributionColumnName,
 		CheckReplicationModel(sourceRelationId, relationId);
 		CheckDistributionColumnType(sourceRelationId, relationId);
 
-
-		CreateColocatedShards(relationId, sourceRelationId);
+		CreateColocatedShards(relationId, sourceRelationId, emptyTable);
 	}
 	else
 	{
-		CreateShardsWithRoundRobinPolicy(relationId, shardCount, replicationFactor);
+		CreateShardsWithRoundRobinPolicy(relationId, shardCount, replicationFactor,
+										 emptyTable);
 	}
 
 	/* copy over data for regular relations */
@@ -678,6 +661,43 @@ CreateHashDistributedTable(Oid relationId, char *distributionColumnName,
 
 	heap_close(pgDistColocation, NoLock);
 	relation_close(distributedRelation, NoLock);
+}
+
+/*
+ * EnsureSchemaExistsOnAllNodes connects to all nodes with citus extension user
+ * and creates the schema of the given relationId. The function errors out if the
+ * command cannot be executed in any of the worker nodes.
+ */
+static void
+EnsureSchemaExistsOnAllNodes(Oid relationId)
+{
+	List *workerNodeList = ActiveWorkerNodeList();
+	ListCell *workerNodeCell = NULL;
+	StringInfo applySchemaCreationDDL = makeStringInfo();
+
+	Oid schemaId = get_rel_namespace(relationId);
+	char *schemaName = get_namespace_name(schemaId);
+	const char *createSchemaDDL = CreateSchemaDDLCommand(schemaId);
+
+	if(createSchemaDDL != NULL)
+	{
+		appendStringInfo(applySchemaCreationDDL,"%s", createSchemaDDL);
+
+		foreach(workerNodeCell, workerNodeList)
+		{
+			WorkerNode *workerNode = (WorkerNode *) lfirst(workerNodeCell);
+			char *nodeName = workerNode->workerName;
+			uint32 nodePort = workerNode->workerPort;
+			bool commandExecuted = false;
+
+			commandExecuted = ExecuteRemoteCommand(nodeName, nodePort, applySchemaCreationDDL);
+			if (!commandExecuted)
+			{
+				ereport(ERROR, (errmsg("could not create schema %s on node %s:%d",
+												   schemaName, nodeName, nodePort)));
+			}
+		}
+	}
 }
 
 

@@ -24,6 +24,7 @@
 #include "commands/tablecmds.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
+#include "distributed/citus_locals.h"
 #include "distributed/colocation_utils.h"
 #include "distributed/connection_management.h"
 #include "distributed/multi_client_executor.h"
@@ -39,6 +40,7 @@
 #include "distributed/transaction_management.h"
 #include "distributed/worker_manager.h"
 #include "distributed/worker_protocol.h"
+#include "distributed/worker_transaction.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
@@ -74,6 +76,7 @@ master_create_empty_shard(PG_FUNCTION_ARGS)
 	List *workerNodeList = NIL;
 	uint64 shardId = INVALID_SHARD_ID;
 	List *ddlEventList = NULL;
+	List *foreignConstraintCommandList;
 	uint32 attemptableNodeCount = 0;
 	uint32 liveNodeCount = 0;
 
@@ -89,6 +92,8 @@ master_create_empty_shard(PG_FUNCTION_ARGS)
 	char *relationOwner = TableOwner(relationId);
 	char replicationModel = REPLICATION_MODEL_INVALID;
 	bool includeSequenceDefaults = false;
+	bool emptyTable = true;
+	bool createInSeparateShard = true;
 
 	CheckCitusVersion(ERROR);
 
@@ -142,6 +147,7 @@ master_create_empty_shard(PG_FUNCTION_ARGS)
 
 	/* get table DDL commands to replay on the worker node */
 	ddlEventList = GetTableDDLEvents(relationId, includeSequenceDefaults);
+	foreignConstraintCommandList = GetTableForeignConstraintCommands(relationId);
 
 	/* if enough live nodes, add an extra candidate node as backup */
 	attemptableNodeCount = ShardReplicationFactor;
@@ -184,10 +190,12 @@ master_create_empty_shard(PG_FUNCTION_ARGS)
 		candidateNodeIndex++;
 	}
 
-	CreateShardPlacements(relationId, shardId, ddlEventList, relationOwner,
-						  candidateNodeList, 0, ShardReplicationFactor);
-
 	InsertShardRow(relationId, shardId, storageType, nullMinValue, nullMaxValue);
+
+	CreateShardPlacements(relationId, shardId, ddlEventList, foreignConstraintCommandList,
+						  relationOwner, candidateNodeList, 0, ShardReplicationFactor,
+						  emptyTable, createInSeparateShard);
+
 
 	PG_RETURN_INT64(shardId);
 }
@@ -370,15 +378,18 @@ CheckDistributedTable(Oid relationId)
  * replication factor is not attained, an error is raised (placements remain on
  * nodes if some DDL commands had been successful).
  */
-void
+List *
 CreateShardPlacements(Oid relationId, int64 shardId, List *ddlEventList,
+					  List *foreignConstraintCommandList,
 					  char *newPlacementOwner, List *workerNodeList,
-					  int workerStartIndex, int replicationFactor)
+					  int workerStartIndex, int replicationFactor,
+					  bool emptyTable, bool createInSeparateShard)
 {
 	int attemptCount = replicationFactor;
 	int workerNodeCount = list_length(workerNodeList);
 	int placementsCreated = 0;
 	int attemptNumber = 0;
+	List *connectionList = NIL;
 
 	/* if we have enough nodes, add an extra placement attempt for backup */
 	if (workerNodeCount > replicationFactor)
@@ -392,28 +403,21 @@ CreateShardPlacements(Oid relationId, int64 shardId, List *ddlEventList,
 		WorkerNode *workerNode = (WorkerNode *) list_nth(workerNodeList, workerNodeIndex);
 		char *nodeName = workerNode->workerName;
 		uint32 nodePort = workerNode->workerPort;
-		List *foreignConstraintCommandList = GetTableForeignConstraintCommands(
-			relationId);
 		int shardIndex = -1; /* not used in this code path */
-		bool created = false;
+		const RelayFileState shardState = FILE_FINALIZED;
+		const uint64 shardSize = 0;
+		MultiConnection *connection = NULL;
 
-		created = WorkerCreateShard(relationId, nodeName, nodePort, shardIndex,
-									shardId, newPlacementOwner, ddlEventList,
-									foreignConstraintCommandList);
-		if (created)
-		{
-			const RelayFileState shardState = FILE_FINALIZED;
-			const uint64 shardSize = 0;
+		InsertShardPlacementRow(shardId, INVALID_PLACEMENT_ID, shardState, shardSize,
+								nodeName, nodePort);
 
-			InsertShardPlacementRow(shardId, INVALID_PLACEMENT_ID, shardState, shardSize,
-									nodeName, nodePort);
-			placementsCreated++;
-		}
-		else
-		{
-			ereport(WARNING, (errmsg("could not create shard on \"%s:%u\"",
-									 nodeName, nodePort)));
-		}
+		connection = WorkerCreateShard(relationId, nodeName, nodePort, shardIndex,
+						  shardId, newPlacementOwner, ddlEventList,
+						  foreignConstraintCommandList, emptyTable,
+						  createInSeparateShard);
+
+		connectionList = lappend(connectionList, connection);
+		placementsCreated++;
 
 		if (placementsCreated >= replicationFactor)
 		{
@@ -427,31 +431,72 @@ CreateShardPlacements(Oid relationId, int64 shardId, List *ddlEventList,
 		ereport(ERROR, (errmsg("could only create %u of %u of required shard replicas",
 							   placementsCreated, replicationFactor)));
 	}
+
+	return connectionList;
 }
 
 
 /*
- * WorkerCreateShard applies DDL commands for the given shardId to create the
- * shard on the worker node. Note that this function opens a new connection for
- * each DDL command, and could leave the shard in an half-initialized state.
+ * WorkerCreateShard applies DDL commands and foreign constraint commands for
+ * the given shardId to create the shard on the worker node. If it can not
+ * create a shard on the worker, errors out.
  */
-bool
+MultiConnection *
 WorkerCreateShard(Oid relationId, char *nodeName, uint32 nodePort,
 				  int shardIndex, uint64 shardId, char *newShardOwner,
-				  List *ddlCommandList, List *foreignConstraintCommandList)
+				  List *ddlCommandList, List *foreignConstraintCommandList,
+				  bool emptyTable, bool createInSeparateTransaction)
 {
 	Oid schemaId = get_rel_namespace(relationId);
 	char *schemaName = get_namespace_name(schemaId);
 	char *escapedSchemaName = quote_literal_cstr(schemaName);
-	bool shardCreated = true;
 	ListCell *ddlCommandCell = NULL;
 	ListCell *foreignConstraintCommandCell = NULL;
+	MultiConnection *connection = NULL;
+	uint32 connectionFlags = FOR_DDL;
+	List *shardPlacementList = NULL;
+	ListCell *shardPlacementCell = NULL;
+	ShardPlacement *shardPlacement = NULL;
+
+	/* get the connection to send each transaction on */
+	if (!createInSeparateTransaction)
+	{
+		BeginOrContinueCoordinatedTransaction();
+
+		// XXX Is there another way to get the one with the largest ID
+		/* we need to get the shard placement with the largest id */
+		shardPlacementList = FinalizedShardPlacementList(shardId);
+		shardPlacement = (ShardPlacement *) linitial(shardPlacementList);
+
+		if (IsTransactionBlock() || !emptyTable)
+		{
+			foreach(shardPlacementCell, shardPlacementList)
+			{
+				ShardPlacement *placement = (ShardPlacement *) lfirst(shardPlacementCell);
+
+				if (placement->placementId > shardPlacement->placementId)
+				{
+					shardPlacement = placement;
+				}
+			}
+
+			connection = GetPlacementConnection(connectionFlags, shardPlacement, NULL);
+			ClaimConnectionExclusively(connection);
+		}
+
+		else
+		{
+			connection = GetNodeConnection(connectionFlags, nodeName, nodePort);
+		}
+
+		RemoteTransactionBeginIfNecessary(connection);
+		MarkRemoteTransactionCritical(connection);
+	}
 
 	foreach(ddlCommandCell, ddlCommandList)
 	{
 		char *ddlCommand = (char *) lfirst(ddlCommandCell);
 		char *escapedDDLCommand = quote_literal_cstr(ddlCommand);
-		List *queryResultList = NIL;
 		StringInfo applyDDLCommand = makeStringInfo();
 
 		if (strcmp(schemaName, "public") != 0)
@@ -466,12 +511,14 @@ WorkerCreateShard(Oid relationId, char *nodeName, uint32 nodePort,
 							 escapedDDLCommand);
 		}
 
-		queryResultList = ExecuteRemoteQuery(nodeName, nodePort, newShardOwner,
-											 applyDDLCommand);
-		if (queryResultList == NIL)
+		if (createInSeparateTransaction)
 		{
-			shardCreated = false;
-			break;
+			ExecuteRemoteQuery(nodeName, nodePort, newShardOwner, applyDDLCommand);
+		}
+
+		else
+		{
+			ExecuteCriticalRemoteCommand(connection, applyDDLCommand->data);
 		}
 	}
 
@@ -486,7 +533,6 @@ WorkerCreateShard(Oid relationId, char *nodeName, uint32 nodePort,
 		char *escapedReferencedSchemaName = NULL;
 		uint64 referencedShardId = INVALID_SHARD_ID;
 
-		List *queryResultList = NIL;
 		StringInfo applyForeignConstraintCommand = makeStringInfo();
 
 		/* we need to parse the foreign constraint command to get referencing table id */
@@ -522,16 +568,20 @@ WorkerCreateShard(Oid relationId, char *nodeName, uint32 nodePort,
 						 WORKER_APPLY_INTER_SHARD_DDL_COMMAND, shardId, escapedSchemaName,
 						 referencedShardId, escapedReferencedSchemaName, escapedCommand);
 
-		queryResultList = ExecuteRemoteQuery(nodeName, nodePort, newShardOwner,
-											 applyForeignConstraintCommand);
-		if (queryResultList == NIL)
+		if (createInSeparateTransaction)
 		{
-			shardCreated = false;
-			break;
+			ExecuteRemoteQuery(nodeName, nodePort, newShardOwner, applyForeignConstraintCommand);
 		}
+
+		else
+		{
+			ExecuteCriticalRemoteCommand(connection, applyForeignConstraintCommand->data);
+		}
+
 	}
 
-	return shardCreated;
+	return connection;
+
 }
 
 
